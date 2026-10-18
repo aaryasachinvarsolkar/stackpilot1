@@ -1,0 +1,68 @@
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL with pgvector extension
+  # ---------------------------------------------------------------------------
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: stackpilot-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: stackpilot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stackpilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Backend API (Python FastAPI)
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stackpilot-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "False"
+      PORT: 8000
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql+asyncpg://postgres:postgrespassword@db:5432/stackpilot
+      CORS_ORIGINS: http://localhost:3000,http://frontend:3000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+
+  # ---------------------------------------------------------------------------
+  # Frontend Web UI (Next.js / React)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: stackpilot-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+    driver: local

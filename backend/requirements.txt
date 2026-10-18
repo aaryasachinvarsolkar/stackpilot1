@@ -1,0 +1,10 @@
+# Runtime dependencies. Pinned to the versions verified on Python 3.13 (see requirements-dev.txt for test tools).
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+sqlalchemy==2.0.54
+aiosqlite==0.22.1
+asyncpg==0.31.0
+httpx==0.28.1
+python-dotenv==1.2.3

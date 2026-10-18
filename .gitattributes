@@ -1,0 +1,26 @@
+# Normalise line endings: text files are stored with LF in the repository and checked out with LF
+# on every platform. Git decides what is text; known binary types are listed explicitly.
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF to run correctly
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files: never convert or diff as text
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
