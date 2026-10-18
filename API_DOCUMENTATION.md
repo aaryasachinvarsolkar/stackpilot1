@@ -36,72 +36,86 @@ Detailed system and dependency readiness check.
 
 ---
 
+> **Implementation status (Phase 2).** Sections 2-4 describe the endpoints that **exist today**.
+> Sections 5-7 (agent, sandbox, git) and the upload/index endpoints are **planned and not
+> implemented**. There is **no authentication yet** (planned for Phase 4): every endpoint is open.
+> Anywhere `{project_id}` appears, the project's UUID or its name is accepted. Unknown projects
+> always return `404`; the API never substitutes demo data.
+
 ## 2. Projects & Workspace (`/api/projects`)
 
 ### `GET /api/projects`
-List all registered projects for the active user.
+List registered projects (newest first). Read-only. Each item contains `id`, `name`,
+`description`, `root_path`, `is_indexed`, `languages`, `last_indexed`, `created_at`, plus:
+- `file_count`: measured on disk when the request is made (ignored folders such as
+  `node_modules` and symlinks are excluded);
+- `workspace_exists`: `false` if the project's folder is missing from disk.
+
+> `is_indexed`, `languages` and `last_indexed` are the stored values. Indexing is not implemented,
+> so treat `is_indexed` as unreliable for rows created before Phase 2 (see PROGRESS/Phase 3).
 
 ### `POST /api/projects`
-Create a new project.
-- **Request Body**:
+Create a project and scaffold its starter files. `201` on success.
 ```json
-{
-  "name": "my-saas-app",
-  "description": "Production SaaS application",
-  "path": "/workspace/projects/my-saas-app"
-}
+{ "name": "my-saas-app", "description": "optional", "source_type": "blank", "template": "FastAPI + Python" }
 ```
+- `name`: 1-100 characters; letters, digits, `.`, `_`, `-`; must start with a letter or digit; no
+  spaces, slashes or reserved Windows names (`con`, `nul`, ...). Invalid names return `422`.
+- `template`: `FastAPI + Python` (default), `Next.js + TypeScript` or `Go Microservice`; anything
+  else returns `422`.
+- `source_type`: only `blank` is implemented. `upload` and `git` return `501`.
+- `409` if the name is registered **or** a folder with that name already exists on disk (existing
+  files are never adopted or overwritten).
+- If the database write fails, the folder created by that request is removed and `500` is returned.
 
-### `GET /api/projects/{id}`
-Retrieve project details, metadata, and index status.
+### `GET /api/projects/{project_id}`
+Project details (same shape as the list items). `404` if unknown.
 
-### `POST /api/projects/{id}/upload`
-Upload a project zip/tar archive to initialize workspace files.
-
-### `POST /api/projects/{id}/index`
-Trigger background AST parsing, semantic chunking, and vector embedding generation.
+### `DELETE /api/projects/{project_id}`
+Unregisters the project. **Only the database record is removed; files on disk are preserved.**
+`204`, or `404` if unknown.
 
 ---
 
-## 3. Files & Code Navigation (`/api/files`)
+## 3. Files (`/api/projects/{project_id}/files`)
 
-### `GET /api/files/tree?project_id={id}`
-Retrieve hierarchical directory tree for the project, excluding ignored patterns.
+Paths are relative to the project's folder. Absolute paths, drive letters or `:`, `..` segments,
+NUL bytes, empty paths and anything resolving outside the folder (including via symlinks) return
+`400` with `Illegal file path. Path traversal is strictly prohibited.`
 
-### `POST /api/files/read`
-Read file content and line range.
-- **Request Body**:
-```json
-{
-  "project_id": "proj_123",
-  "file_path": "src/controllers/auth.ts",
-  "start_line": 1,
-  "end_line": 100
-}
-```
+### `GET .../files/tree`
+Real directory tree of the project folder (ignored folders/files and symlinks are skipped). `404`
+if the project is unknown or its folder does not exist; `[]` for an empty folder.
 
-### `POST /api/files/write`
-Save changes directly to a file (or create if non-existent).
+### `GET .../files/content?path=app/main.py`
+Returns `path`, `file_name`, `content`, `line_count`, `language`. Content is returned exactly as
+stored (no newline translation). `404` missing file or directory, `413` larger than
+`MAX_FILE_SIZE_BYTES` (default 2 MiB), `415` binary or non-UTF-8 files.
 
----
-
-## 4. AI Chat & RAG Retrieval (`/api/chat`)
-
-### `POST /api/chat`
-Ask a question or initiate discussion grounded in the codebase.
-- **Request Body**:
-```json
-{
-  "project_id": "proj_123",
-  "message": "Where is user JWT token validation implemented?",
-  "conversation_id": "conv_456"
-}
-```
-- **Response**: Streamed SSE or JSON containing message explanation and citation array (`file_path`, `function_name`, `line_numbers`).
+### `PUT .../files/content`
+Body `{"path": "...", "content": "..."}`. Writes the exact UTF-8 bytes atomically (temporary file +
+replace) and creates missing parent folders inside the project. Returns
+`{"status": "saved", "path", "bytes_written"}`. `404` unknown project or missing project folder
+(it is never created implicitly), `400` unsafe path or path is a directory, `413` too large.
 
 ---
 
-## 5. Agent Orchestrator & Task Execution (`/api/agent`)
+## 4. AI Chat (`/api/projects/{project_id}/chat`)
+
+### `GET .../chat/history`
+Stored messages of the most recent conversation, oldest first; `[]` if there are none.
+
+### `POST .../chat`
+Body `{"message": "...", "mode": "agent|chat|review", "conversation_id": null}`.
+**Currently always returns `503`**: no LLM provider is implemented or configured yet (planned for
+Phase 6). Nothing is stored. Invalid bodies return `422`; unknown projects `404`.
+
+### `GET /api/info`
+Lists only the capabilities that exist today and `ai_available` (currently `false`).
+
+---
+
+## 5. Agent Orchestrator & Task Execution (`/api/agent`) — *planned, not implemented*
 
 ### `POST /api/agent/task`
 Initiate an agentic engineering task (feature addition, refactor, bugfix).
@@ -135,7 +149,7 @@ Check real-time agent execution state, tool calls, and unified diff output.
 
 ---
 
-## 6. Execution & Sandbox (`/api/sandbox`)
+## 6. Execution & Sandbox (`/api/sandbox`) — *planned, not implemented*
 
 ### `POST /api/tests/run`
 Run test suite inside Docker sandbox.
@@ -152,7 +166,7 @@ Run build command inside Docker sandbox.
 
 ---
 
-## 7. Version Control (`/api/git`)
+## 7. Version Control (`/api/git`) — *planned, not implemented*
 
 ### `GET /api/git/status?project_id={id}`
 Return modified, added, and untracked files.

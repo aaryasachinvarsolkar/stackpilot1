@@ -1,46 +1,40 @@
+import logging
 import os
+import shutil
 import uuid
-from typing import Optional, List
-from datetime import datetime, timezone
-from pydantic import BaseModel, Field, ConfigDict
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from typing import List, Optional
 
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_project_or_404
 from app.database import get_db
-from app.models.project import Project, ProjectFile
+from app.models.project import Project
+from app.services.workspace import (
+    UnsafePathError,
+    count_workspace_files,
+    project_dir_for,
+    validate_project_name,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
-class ProjectCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
-    description: Optional[str] = ""
-    source_type: str = Field("blank", pattern="^(blank|upload|git)$")
-    template: Optional[str] = "FastAPI + Python"
-    git_url: Optional[str] = None
-    git_branch: Optional[str] = "main"
-
-
-class ProjectResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    name: str
-    description: Optional[str]
-    root_path: str
-    is_indexed: bool
-    languages: List[str]
-    file_count: int
-    last_indexed: Optional[str] = None
-    created_at: str
-
-
 DEFAULT_STARTER_FILES = {
     "FastAPI + Python": {
+        "app/__init__.py": "",
+        "app/api/__init__.py": "",
         "app/main.py": """from fastapi import FastAPI
 
+from app.api.routes import router
+
 app = FastAPI(title="Microservice API", version="0.1.0")
+app.include_router(router)
+
 
 @app.get("/")
 def read_root():
@@ -50,7 +44,8 @@ def read_root():
 
 router = APIRouter()
 
-@app.get("/items")
+
+@router.get("/items")
 def get_items():
     return [{"id": 1, "name": "Item Alpha"}]
 """,
@@ -110,18 +105,79 @@ Lightweight and concurrent microservice powered by Go.
     },
 }
 
+TEMPLATE_LANGUAGES = {
+    "FastAPI + Python": ["Python"],
+    "Next.js + TypeScript": ["TypeScript", "React"],
+    "Go Microservice": ["Go"],
+}
+
+DEFAULT_TEMPLATE = "FastAPI + Python"
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = ""
+    source_type: str = Field("blank", pattern="^(blank|upload|git)$")
+    template: Optional[str] = DEFAULT_TEMPLATE
+    git_url: Optional[str] = None
+    git_branch: Optional[str] = "main"
+
+    @field_validator("name")
+    @classmethod
+    def _valid_name(cls, v: str) -> str:
+        return validate_project_name(v)
+
+    @field_validator("template")
+    @classmethod
+    def _known_template(cls, v: Optional[str]) -> str:
+        if v is None:
+            return DEFAULT_TEMPLATE
+        if v not in DEFAULT_STARTER_FILES:
+            raise ValueError(f"Unknown template '{v}'. Available: {', '.join(DEFAULT_STARTER_FILES)}.")
+        return v
+
+
+class ProjectResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    description: Optional[str]
+    root_path: str
+    is_indexed: bool
+    languages: List[str]
+    file_count: int  # measured on disk at request time, not the stored value
+    workspace_exists: bool
+    last_indexed: Optional[str] = None
+    created_at: str
+
+
+def to_response(p: Project) -> ProjectResponse:
+    on_disk = count_workspace_files(p.root_path)
+    return ProjectResponse(
+        id=p.id,
+        name=p.name,
+        description=p.description,
+        root_path=p.root_path,
+        is_indexed=p.is_indexed,
+        languages=p.languages or [],
+        file_count=on_disk or 0,
+        workspace_exists=on_disk is not None,
+        last_indexed=p.last_indexed_at.strftime("%Y-%m-%d %H:%M") if p.last_indexed_at else "Pending",
+        created_at=p.created_at.isoformat(),
+    )
+
 
 def scaffold_starter_project(root_path: str, template: str) -> List[str]:
-    """Write starter files for a template into the project root path."""
+    """Write a template's starter files into root_path. Existing files are never overwritten."""
     os.makedirs(root_path, exist_ok=True)
-    file_map = DEFAULT_STARTER_FILES.get(template, DEFAULT_STARTER_FILES["FastAPI + Python"])
     created_files = []
 
-    for rel_path, content in file_map.items():
+    for rel_path, content in DEFAULT_STARTER_FILES[template].items():
         full_path = os.path.join(root_path, rel_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         if not os.path.exists(full_path):
-            with open(full_path, "w", encoding="utf-8") as f:
+            with open(full_path, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
         created_files.append(rel_path)
 
@@ -130,165 +186,77 @@ def scaffold_starter_project(root_path: str, template: str) -> List[str]:
 
 @router.get("", response_model=List[ProjectResponse])
 async def list_projects(db: AsyncSession = Depends(get_db)):
-    """List all registered projects. Auto-seeds defaults if table is empty."""
-    stmt = select(Project).order_by(Project.created_at.desc())
-    result = await db.execute(stmt)
-    projects = result.scalars().all()
-
-    # Seed default sample projects if database has 0 projects
-    if not projects:
-        default_defs = [
-            {
-                "name": "task-manager-service",
-                "description": "Distributed task orchestrator with FastAPI backend and async worker pool",
-                "languages": ["Python", "SQLAlchemy", "AsyncPG"],
-                "file_count": 24,
-            },
-            {
-                "name": "auth-microservice",
-                "description": "OAuth2 / JWT token authentication service with Redis session store",
-                "languages": ["TypeScript", "Next.js", "Redis"],
-                "file_count": 18,
-            },
-            {
-                "name": "e-commerce-api",
-                "description": "High-throughput checkout API with Stripe webhook integrations",
-                "languages": ["Go", "PostgreSQL", "Docker"],
-                "file_count": 42,
-            },
-        ]
-        seeded = []
-        for d in default_defs:
-            proj_dir = os.path.abspath(os.path.join(os.getcwd(), "workspaces", d["name"]))
-            p = Project(
-                id=str(uuid.uuid4()),
-                name=d["name"],
-                description=d["description"],
-                root_path=proj_dir,
-                is_indexed=True,
-                languages=d["languages"],
-                file_count=d["file_count"],
-                last_indexed_at=datetime.now(timezone.utc),
-            )
-            db.add(p)
-            seeded.append(p)
-        await db.commit()
-        for p in seeded:
-            await db.refresh(p)
-        projects = seeded
-
-    return [
-        ProjectResponse(
-            id=p.id,
-            name=p.name,
-            description=p.description,
-            root_path=p.root_path,
-            is_indexed=p.is_indexed,
-            languages=p.languages or [],
-            file_count=p.file_count,
-            last_indexed=p.last_indexed_at.strftime("%Y-%m-%d %H:%M") if p.last_indexed_at else "Pending",
-            created_at=p.created_at.isoformat(),
-        )
-        for p in projects
-    ]
+    """List registered projects. Read-only: this never creates or modifies anything."""
+    result = await db.execute(select(Project).order_by(Project.created_at.desc()))
+    return [to_response(p) for p in result.scalars().all()]
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depends(get_db)):
-    """Create a new project workspace and scaffold initial template files."""
-    # Check if a project with the same name already exists
-    stmt = select(Project).where(Project.name == payload.name)
-    existing = (await db.execute(stmt)).scalars().first()
-    if existing:
+    """Create a new project workspace and scaffold the chosen template's starter files."""
+    if payload.source_type != "blank":
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Project '{payload.name}' already exists.",
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=f"Creating a project from source '{payload.source_type}' is not implemented yet.",
         )
 
-    # Establish workspace directory
-    proj_dir = os.path.abspath(os.path.join(os.getcwd(), "workspaces", payload.name))
-    template_name = payload.template or "FastAPI + Python"
-    created_files = scaffold_starter_project(proj_dir, template_name)
+    existing = (await db.execute(select(Project).where(Project.name == payload.name))).scalars().first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{payload.name}' already exists.")
 
-    # Determine languages
-    if "Python" in template_name:
-        langs = ["Python"]
-    elif "Next.js" in template_name:
-        langs = ["TypeScript", "React"]
-    elif "Go" in template_name:
-        langs = ["Go"]
-    else:
-        langs = ["Plaintext"]
+    try:
+        proj_dir = project_dir_for(payload.name)
+    except UnsafePathError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
-    project = Project(
-        id=str(uuid.uuid4()),
-        name=payload.name,
-        description=payload.description or f"Project created with {template_name} starter.",
-        root_path=proj_dir,
-        is_indexed=False,
-        languages=langs,
-        file_count=len(created_files),
-        last_indexed_at=None,
-    )
-    db.add(project)
-    await db.commit()
-    await db.refresh(project)
+    # exist_ok=False makes folder creation atomic: we never adopt or write into a folder that
+    # already holds someone's files (e.g. one left on disk after a project was unregistered).
+    try:
+        proj_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A workspace folder named '{payload.name}' already exists on disk.",
+        )
+    except OSError:
+        logger.exception("Could not create workspace folder %s", proj_dir)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not create workspace folder.")
 
-    return ProjectResponse(
-        id=project.id,
-        name=project.name,
-        description=project.description,
-        root_path=project.root_path,
-        is_indexed=project.is_indexed,
-        languages=project.languages,
-        file_count=project.file_count,
-        last_indexed=None,
-        created_at=project.created_at.isoformat(),
-    )
+    template = payload.template or DEFAULT_TEMPLATE
+    try:
+        scaffold_starter_project(str(proj_dir), template)
+        project = Project(
+            id=str(uuid.uuid4()),
+            name=payload.name,
+            description=payload.description or f"Project created with {template} starter.",
+            root_path=str(proj_dir),
+            is_indexed=False,
+            languages=TEMPLATE_LANGUAGES[template],
+            file_count=count_workspace_files(proj_dir) or 0,
+            last_indexed_at=None,
+        )
+        db.add(project)
+        await db.commit()
+        await db.refresh(project)
+    except Exception:
+        # Only the folder created a moment ago by this request is removed.
+        await db.rollback()
+        shutil.rmtree(proj_dir, ignore_errors=True)
+        logger.exception("Project creation failed for '%s'", payload.name)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Project creation failed.")
+
+    return to_response(project)
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: str, db: AsyncSession = Depends(get_db)):
-    """Retrieve details for a specific project by UUID or Name."""
-    # Try by UUID first
-    stmt = select(Project).where(Project.id == project_id)
-    project = (await db.execute(stmt)).scalars().first()
-    if not project:
-        # Fallback search by name
-        stmt = select(Project).where(Project.name == project_id)
-        project = (await db.execute(stmt)).scalars().first()
-
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project '{project_id}' not found.",
-        )
-
-    return ProjectResponse(
-        id=project.id,
-        name=project.name,
-        description=project.description,
-        root_path=project.root_path,
-        is_indexed=project.is_indexed,
-        languages=project.languages or [],
-        file_count=project.file_count,
-        last_indexed=project.last_indexed_at.strftime("%Y-%m-%d %H:%M") if project.last_indexed_at else "Pending",
-        created_at=project.created_at.isoformat(),
-    )
+async def get_project(project: Project = Depends(get_project_or_404)):
+    """Retrieve details for a specific project by UUID or name."""
+    return to_response(project)
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
-    """Remove a project from the registry."""
-    stmt = select(Project).where(Project.id == project_id)
-    project = (await db.execute(stmt)).scalars().first()
-    if not project:
-        stmt = select(Project).where(Project.name == project_id)
-        project = (await db.execute(stmt)).scalars().first()
-
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-
+async def delete_project(project: Project = Depends(get_project_or_404), db: AsyncSession = Depends(get_db)):
+    """Unregister a project. Only the database record is removed; files on disk are preserved."""
     await db.delete(project)
     await db.commit()
     return None

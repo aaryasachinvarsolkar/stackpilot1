@@ -42,21 +42,18 @@ async def detailed_health():
 
 @router.get("/api/info", summary="System Information")
 async def system_info():
-    """Return platform metadata, features, and active settings."""
+    """Return platform metadata, the features that are actually implemented, and active settings."""
     return {
         "name": "STACKPILOT",
         "tagline": "AI-Powered Software Development Platform",
         "version": "0.1.0",
         "status": "operational",
+        # Only features that exist today. Add an entry when its backend ships with tests.
         "capabilities": [
-            "Codebase Indexing (AST)",
-            "Semantic RAG Retrieval",
-            "Agent Planning & Tool Calling",
-            "Multi-File Modification & Diff Review",
-            "Sandboxed Execution & Testing",
-            "Automated Debugging Loops",
-            "Git Integration",
+            "Project registry",
+            "Workspace file browsing and editing",
         ],
+        "ai_available": False,
         "active_providers": {
             "llm": settings.LLM_PROVIDER,
             "embedding": settings.EMBEDDING_PROVIDER,

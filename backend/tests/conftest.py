@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Callable
 
@@ -21,6 +22,7 @@ REAL_WORKSPACES = BACKEND_DIR / "workspaces"
 # variables priority over .env, so this overrides whatever DATABASE_URL is configured.
 SANDBOX = Path(tempfile.mkdtemp(prefix="stackpilot-tests-")).resolve()
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{(SANDBOX / 'test.db').as_posix()}"
+os.environ["WORKSPACES_ROOT"] = str(SANDBOX / "workspaces")
 os.environ["ENVIRONMENT"] = "test"
 os.environ["DEBUG"] = "False"
 
@@ -82,6 +84,15 @@ async def setup_test_db(sandbox_cwd):
         await conn.run_sync(Base.metadata.create_all)
     yield
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def project(async_client) -> dict:
+    """A real project created through the API with a unique name (starter files on disk)."""
+    name = f"t-{uuid.uuid4().hex[:10]}"
+    res = await async_client.post("/api/projects", json={"name": name, "source_type": "blank"})
+    assert res.status_code == 201, res.text
+    return res.json()
 
 
 @pytest_asyncio.fixture

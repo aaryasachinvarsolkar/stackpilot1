@@ -1,35 +1,28 @@
+import logging
 import os
-from typing import List, Optional, Union
-from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+import tempfile
+from pathlib import Path
+from typing import List, Optional
 
-from app.database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
+
+from app.api.deps import get_project_or_404
+from app.config import settings
 from app.models.project import Project
+from app.services.workspace import (
+    IGNORED_DIRS,
+    IGNORED_FILES,
+    PATH_ERROR_MESSAGE,
+    UnsafePathError,
+    resolve_in_project,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects/{project_id}/files", tags=["files"])
 
-IGNORED_DIRS = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".pytest_cache",
-    ".next",
-    "dist",
-    "build",
-    ".idea",
-    ".vscode",
-}
-
-IGNORED_FILES = {
-    ".DS_Store",
-    "Thumbs.db",
-    "stackpilot.db",
-    ".env",
-}
+_BINARY_SNIFF_BYTES = 8192
 
 
 class TreeNode(BaseModel):
@@ -86,35 +79,32 @@ def detect_language(file_name: str) -> str:
 
 
 def scan_directory_tree(dir_path: str, base_path: str) -> List[TreeNode]:
-    """Recursively scan directory and construct a TreeNode list."""
+    """Recursively scan a directory into TreeNodes. Symlinks are never followed or listed."""
     nodes: List[TreeNode] = []
-    if not os.path.exists(dir_path):
-        return nodes
-
     try:
-        entries = sorted(os.scandir(dir_path), key=lambda e: (not e.is_dir(), e.name.lower()))
-    except PermissionError:
+        entries = sorted(os.scandir(dir_path), key=lambda e: (not e.is_dir(follow_symlinks=False), e.name.lower()))
+    except OSError:
+        logger.warning("Could not scan directory %s", dir_path, exc_info=True)
         return nodes
 
     for entry in entries:
-        if entry.name in IGNORED_DIRS or entry.name in IGNORED_FILES:
+        if entry.name in IGNORED_DIRS or entry.name in IGNORED_FILES or entry.is_symlink():
             continue
 
         rel_path = os.path.relpath(entry.path, base_path).replace("\\", "/")
 
-        if entry.is_dir():
-            child_nodes = scan_directory_tree(entry.path, base_path)
+        if entry.is_dir(follow_symlinks=False):
             nodes.append(
                 TreeNode(
                     name=entry.name,
                     path=rel_path,
                     type="directory",
-                    children=child_nodes,
+                    children=scan_directory_tree(entry.path, base_path),
                 )
             )
         else:
             try:
-                size = entry.stat().st_size
+                size = entry.stat(follow_symlinks=False).st_size
             except OSError:
                 size = 0
             nodes.append(
@@ -130,251 +120,110 @@ def scan_directory_tree(dir_path: str, base_path: str) -> List[TreeNode]:
     return nodes
 
 
-DEFAULT_DEMO_TREE = [
-    TreeNode(
-        name="app",
-        path="app",
-        type="directory",
-        children=[
-            TreeNode(
-                name="api",
-                path="app/api",
-                type="directory",
-                children=[
-                    TreeNode(name="routes.py", path="app/api/routes.py", type="file", size=1883, language="python"),
-                ],
-            ),
-            TreeNode(
-                name="core",
-                path="app/core",
-                type="directory",
-                children=[
-                    TreeNode(name="config.py", path="app/core/config.py", type="file", size=950, language="python"),
-                ],
-            ),
-            TreeNode(
-                name="database",
-                path="app/database",
-                type="directory",
-                children=[
-                    TreeNode(name="connection.py", path="app/database/connection.py", type="file", size=1353, language="python"),
-                    TreeNode(name="session.py", path="app/database/session.py", type="file", size=820, language="python"),
-                ],
-            ),
-            TreeNode(
-                name="models",
-                path="app/models",
-                type="directory",
-                children=[
-                    TreeNode(name="base.py", path="app/models/base.py", type="file", size=585, language="python"),
-                    TreeNode(name="user.py", path="app/models/user.py", type="file", size=1200, language="python"),
-                ],
-            ),
-            TreeNode(
-                name="middleware",
-                path="app/middleware",
-                type="directory",
-                children=[
-                    TreeNode(name="rateLimiter.ts", path="app/middleware/rateLimiter.ts", type="file", size=1420, language="typescript"),
-                ],
-            ),
-            TreeNode(name="main.py", path="app/main.py", type="file", size=1539, language="python"),
-        ],
-    ),
-    TreeNode(
-        name="tests",
-        path="tests",
-        type="directory",
-        children=[
-            TreeNode(name="test_health.py", path="tests/test_health.py", type="file", size=1266, language="python"),
-        ],
-    ),
-    TreeNode(name="requirements.txt", path="requirements.txt", type="file", size=209, language="plaintext"),
-    TreeNode(name="README.md", path="README.md", type="file", size=4941, language="markdown"),
-]
+def _workspace_root(project: Project) -> Path:
+    """The project's folder on disk, or a 404 if it does not exist (no demo fallback)."""
+    root = Path(project.root_path)
+    if not root.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workspace folder for project '{project.name}' does not exist on disk.",
+        )
+    return root
 
 
-DEFAULT_FILE_CONTENTS = {
-    "app/api/routes.py": """from datetime import datetime, timezone
-from fastapi import APIRouter, Depends
-from app.database import check_database_connection
-
-router = APIRouter()
-
-@router.get("/api/health", summary="Detailed Readiness Probe")
-async def detailed_health():
-    \"\"\"Readiness probe checking database connectivity and environment details.\"\"\"
-    db_status = await check_database_connection()
-    return {
-        "status": "healthy" if db_status["status"] == "connected" else "degraded",
-        "database": db_status["status"],
-        "database_type": db_status.get("type", "unknown"),
-        "version": "0.1.0",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-""",
-    "app/main.py": """from fastapi import FastAPI
-from app.api.routes import router as api_router
-
-app = FastAPI(title="STACKPILOT Microservice", version="0.1.0")
-app.include_router(api_router)
-
-@app.get("/health")
-async def health_check():
-    return {"status": "ok"}
-""",
-    "app/middleware/rateLimiter.ts": """import { Request, Response, NextFunction } from "express";
-
-interface RateLimitStore {
-  [ip: string]: { count: number; resetTime: number };
-}
-
-const store: RateLimitStore = {};
-
-export function rateLimiter(limit = 60, windowMs = 60000) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "unknown";
-    const now = Date.now();
-
-    if (!store[ip] || now > store[ip].resetTime) {
-      store[ip] = { count: 1, resetTime: now + windowMs };
-      return next();
-    }
-
-    store[ip].count += 1;
-    if (store[ip].count > limit) {
-      return res.status(429).json({ error: "Too many requests. Please try again later." });
-    }
-    next();
-  };
-}
-""",
-    "requirements.txt": """fastapi>=0.115.0
-uvicorn>=0.30.0
-sqlalchemy>=2.0.35
-aiosqlite>=0.20.0
-pydantic-settings>=2.5.2
-pytest>=8.3.3
-httpx>=0.27.2
-""",
-    "README.md": """# STACKPILOT Microservice
-Unified AI-assisted software development platform and microservice workspace.
-""",
-}
-
-
-async def resolve_project(project_id: str, db: AsyncSession) -> Optional[Project]:
-    stmt = select(Project).where(Project.id == project_id)
-    project = (await db.execute(stmt)).scalars().first()
-    if not project:
-        stmt = select(Project).where(Project.name == project_id)
-        project = (await db.execute(stmt)).scalars().first()
-    return project
+def _safe_path(project_root: Path, relative_path: str) -> Path:
+    try:
+        return resolve_in_project(project_root, relative_path)
+    except UnsafePathError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=PATH_ERROR_MESSAGE)
 
 
 @router.get("/tree", response_model=List[TreeNode])
-async def get_file_tree(project_id: str, db: AsyncSession = Depends(get_db)):
-    """Retrieve the file directory tree for the specified project."""
-    project = await resolve_project(project_id, db)
-    if not project:
-        # Fallback to demo tree if project not found
-        return DEFAULT_DEMO_TREE
-
-    if os.path.exists(project.root_path):
-        tree = scan_directory_tree(project.root_path, project.root_path)
-        if tree:
-            return tree
-
-    return DEFAULT_DEMO_TREE
+async def get_file_tree(project: Project = Depends(get_project_or_404)):
+    """Return the real directory tree of the project's workspace folder."""
+    root = _workspace_root(project)
+    return scan_directory_tree(str(root), str(root))
 
 
 @router.get("/content", response_model=FileContentResponse)
 async def get_file_content(
-    project_id: str,
     path: str = Query(..., description="Relative file path"),
-    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_project_or_404),
 ):
-    """Read content of a specific file."""
-    # Prevent path traversal
-    normalized_path = os.path.normpath(path).replace("\\", "/")
-    if normalized_path.startswith("..") or "/../" in normalized_path:
+    """Read a UTF-8 text file from the project's workspace folder."""
+    root = _workspace_root(project)
+    full_path = _safe_path(root, path)
+
+    if not full_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"File '{path}' not found.")
+
+    try:
+        size = full_path.stat().st_size
+        if size > settings.MAX_FILE_SIZE_BYTES:
+            raise HTTPException(
+                status_code=413,  # literal: the status constant was renamed across Starlette versions
+                detail=f"File is {size} bytes; the limit is {settings.MAX_FILE_SIZE_BYTES} bytes.",
+            )
+        raw = full_path.read_bytes()
+    except HTTPException:
+        raise
+    except OSError:
+        logger.exception("Failed to read %s", full_path)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to read file.")
+
+    if b"\x00" in raw[:_BINARY_SNIFF_BYTES]:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Binary files are not supported.")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Illegal file path. Path traversal is strictly prohibited.",
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="File is not valid UTF-8 text."
         )
 
-    project = await resolve_project(project_id, db)
-    content: Optional[str] = None
-
-    if project and os.path.exists(project.root_path):
-        full_path = os.path.join(project.root_path, normalized_path)
-        if os.path.exists(full_path) and os.path.isfile(full_path):
-            try:
-                with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-            except Exception as e:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to read file: {e}",
-                )
-
-    # Fallback content if file not on disk
-    if content is None:
-        filename = normalized_path.split("/")[-1]
-        content = DEFAULT_FILE_CONTENTS.get(
-            normalized_path,
-            f"# Content of {normalized_path}\n# Loaded via STACKPILOT workspace engine.\n",
-        )
-
-    filename = normalized_path.split("/")[-1]
-    line_count = len(content.splitlines())
-
+    rel = full_path.relative_to(root.resolve()).as_posix()
     return FileContentResponse(
-        path=normalized_path,
-        file_name=filename,
+        path=rel,
+        file_name=full_path.name,
         content=content,
-        line_count=line_count,
-        language=detect_language(filename),
+        line_count=len(content.splitlines()),
+        language=detect_language(full_path.name),
     )
 
 
 @router.put("/content", response_model=FileSaveResponse)
-async def save_file_content(
-    project_id: str,
-    payload: FileSaveRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """Save/update content of a specific file."""
-    normalized_path = os.path.normpath(payload.path).replace("\\", "/")
-    if normalized_path.startswith("..") or "/../" in normalized_path:
+async def save_file_content(payload: FileSaveRequest, project: Project = Depends(get_project_or_404)):
+    """Write a UTF-8 text file inside the project's workspace folder (atomic replace)."""
+    root = _workspace_root(project)
+    full_path = _safe_path(root, payload.path)
+
+    data = payload.content.encode("utf-8")
+    if len(data) > settings.MAX_FILE_SIZE_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Illegal file path. Path traversal is strictly prohibited.",
+            status_code=413,
+            detail=f"Content is {len(data)} bytes; the limit is {settings.MAX_FILE_SIZE_BYTES} bytes.",
         )
+    if full_path.is_dir():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Path refers to a directory.")
 
-    project = await resolve_project(project_id, db)
-    if not project:
-        # Fallback simulation
-        return FileSaveResponse(
-            status="saved",
-            path=normalized_path,
-            bytes_written=len(payload.content.encode("utf-8")),
-        )
-
-    full_path = os.path.join(project.root_path, normalized_path)
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-
+    tmp_name: Optional[str] = None
     try:
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.write(payload.content)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to write file: {e}",
-        )
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write to a temp file in the same folder, then atomically replace, so a failed write
+        # can never leave a truncated file. Bytes are written verbatim (no newline translation).
+        with tempfile.NamedTemporaryFile(dir=full_path.parent, delete=False, prefix=".sp-", suffix=".tmp") as tmp:
+            tmp_name = tmp.name
+            tmp.write(data)
+        os.replace(tmp_name, full_path)
+        tmp_name = None
+    except OSError:
+        logger.exception("Failed to write %s", full_path)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to write file.")
+    finally:
+        if tmp_name and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
     return FileSaveResponse(
         status="saved",
-        path=normalized_path,
-        bytes_written=len(payload.content.encode("utf-8")),
+        path=full_path.relative_to(root.resolve()).as_posix(),
+        bytes_written=len(data),
     )

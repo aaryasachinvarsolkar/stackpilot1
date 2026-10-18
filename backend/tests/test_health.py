@@ -35,3 +35,12 @@ async def test_info_endpoint(async_client: AsyncClient):
     assert "capabilities" in data
     assert len(data["capabilities"]) > 0
     assert "active_providers" in data
+
+
+@pytest.mark.asyncio
+async def test_info_does_not_advertise_unimplemented_capabilities(async_client: AsyncClient):
+    data = (await async_client.get("/api/info")).json()
+    advertised = " ".join(data["capabilities"]).lower()
+    for unbuilt in ("rag", "sandbox", "git", "ast", "agent", "debugging", "diff"):
+        assert unbuilt not in advertised
+    assert data["ai_available"] is False

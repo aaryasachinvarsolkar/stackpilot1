@@ -15,7 +15,12 @@ class Settings(BaseSettings):
     
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./stackpilot.db"
-    
+
+    # Workspaces: directory that holds one folder per project. Empty = <backend>/workspaces.
+    WORKSPACES_ROOT: str = ""
+    # Largest file the file API will read or write (bytes).
+    MAX_FILE_SIZE_BYTES: int = 2 * 1024 * 1024
+
     # AI Providers
     LLM_PROVIDER: str = "mock"
     LLM_API_KEY: str = "mock-key"

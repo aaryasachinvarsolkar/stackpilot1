@@ -64,17 +64,26 @@ Windows and is harmless elsewhere.
 ### Test isolation (important)
 `backend/tests/conftest.py` runs every session against a **throwaway SQLite database and working
 directory** in the system temp folder, and deletes them afterwards. It overrides `DATABASE_URL`
-before the app is imported, refuses to start if the engine could point at `backend/stackpilot.db`,
-and fingerprints the real database and `backend/workspaces/` at the start and end of the session
-(failing the run if either changed). `tests/test_isolation.py` asserts these guarantees.
+and `WORKSPACES_ROOT` before the app is imported, refuses to start if the engine could point at
+`backend/stackpilot.db`, and fingerprints the real database and `backend/workspaces/` at the start
+and end of the session (failing the run if either changed). `tests/test_isolation.py` asserts these
+guarantees.
 Never run the app's test suite against a different harness: the old behaviour created and dropped
 tables in the development database.
 
-### Known-bug tests
-`tests/test_known_bugs.py` encodes verified defects (path escape, unvalidated project names, fake
-fallbacks, seeding on read) as **strict xfail** tests that assert the correct behaviour. When a bug
-is fixed its test XPASSes, strict mode reports that as a failure, and the xfail marker must then be
-removed so it becomes a normal regression test. Expected result today: `19 passed, 9 xfailed`.
+### Backend test files (Phase 2)
+| File | Covers |
+|---|---|
+| `test_workspace_paths.py` | Path/name safety helpers: traversal, absolute and drive paths, symlink/junction escape, name rules |
+| `test_files.py` | File API: real tree, read/write round-trip, 404/413/415/400 cases, containment |
+| `test_projects.py` | Project API: validation, 409/501 cases, file counts from disk, rollback, delete keeps files |
+| `test_chat.py` | Chat history and the honest 503 (no AI provider yet) |
+| `test_security_regressions.py` | One test per audited defect (F1, F2, F3, F3b, F4, F6, F7) |
+| `test_isolation.py` | The test harness cannot touch real data |
+
+The audited defects were first captured as strict-xfail tests (Phase 1). Phase 2 fixed them, the
+strict xfails flipped to failures (XPASS), and the markers were removed. Run the suite from
+`backend/`; the expected result is all tests passing (see the phase report for the current count).
 
 ### Backup before risky work
 ```bash
