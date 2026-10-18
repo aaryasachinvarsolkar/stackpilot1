@@ -46,7 +46,8 @@ Detailed system and dependency readiness check.
 
 ### `GET /api/projects`
 List registered projects (newest first). Read-only. Each item contains `id`, `name`,
-`description`, `root_path`, `is_indexed`, `languages`, `last_indexed`, `created_at`, plus:
+`description`, `root_path`, `is_indexed`, `languages`, `last_indexed`, `created_at` (timezone-aware UTC),
+`origin` (`user` for projects created through the API; `unclassified` for rows that predate origin tracking), plus:
 - `file_count`: measured on disk when the request is made (ignored folders such as
   `node_modules` and symlinks are excluded);
 - `workspace_exists`: `false` if the project's folder is missing from disk.
@@ -64,7 +65,7 @@ Create a project and scaffold its starter files. `201` on success.
 - `template`: `FastAPI + Python` (default), `Next.js + TypeScript` or `Go Microservice`; anything
   else returns `422`.
 - `source_type`: only `blank` is implemented. `upload` and `git` return `501`.
-- `409` if the name is registered **or** a folder with that name already exists on disk (existing
+- `409` if the name is registered (compared ignoring case) **or** a folder with that name already exists on disk (existing
   files are never adopted or overwritten).
 - If the database write fails, the folder created by that request is removed and `500` is returned.
 

@@ -4,7 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api.routes import router as api_router
-from app.database import engine, Base
+from app.database import engine
+from app.database.migrations import ensure_database_ready
 
 logging.basicConfig(
     level=logging.INFO if not settings.DEBUG else logging.DEBUG,
@@ -17,10 +18,10 @@ logger = logging.getLogger("stackpilot")
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown routines."""
     logger.info("Initializing STACKPILOT Backend Service...")
-    # Initialize database tables on startup
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info(f"Database initialized. Environment: {settings.ENVIRONMENT}")
+    # Never migrates an existing database implicitly: creates the schema only on an empty
+    # database, otherwise verifies the revision and refuses to start if it is not current.
+    await ensure_database_ready(engine)
+    logger.info(f"Database ready. Environment: {settings.ENVIRONMENT}")
     yield
     logger.info("Shutting down STACKPILOT Backend Service...")
     await engine.dispose()

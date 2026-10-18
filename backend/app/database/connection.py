@@ -1,7 +1,7 @@
 import logging
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import text
+from sqlalchemy import event, text
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,16 @@ engine = create_async_engine(
     connect_args=connect_args,
     future=True,
 )
+
+if settings.DATABASE_URL.startswith("sqlite"):
+    # SQLite ignores foreign keys unless asked on every connection; without this the declared
+    # ON DELETE CASCADE rules are decoration and deleting a project would orphan its children.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,

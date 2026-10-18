@@ -8,7 +8,8 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
     PORT: int = 8000
-    HOST: str = "0.0.0.0"
+    # Loopback only: there is no authentication yet. Never default to 0.0.0.0.
+    HOST: str = "127.0.0.1"
     
     # CORS Origins (comma-separated or list)
     CORS_ORIGINS: Union[str, List[str]] = "http://localhost:3000,http://127.0.0.1:3000"

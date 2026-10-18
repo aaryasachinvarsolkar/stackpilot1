@@ -6,7 +6,8 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_project_or_404
@@ -148,6 +149,7 @@ class ProjectResponse(BaseModel):
     languages: List[str]
     file_count: int  # measured on disk at request time, not the stored value
     workspace_exists: bool
+    origin: str  # unclassified | user | import | upload | git | seed
     last_indexed: Optional[str] = None
     created_at: str
 
@@ -163,6 +165,7 @@ def to_response(p: Project) -> ProjectResponse:
         languages=p.languages or [],
         file_count=on_disk or 0,
         workspace_exists=on_disk is not None,
+        origin=p.origin,
         last_indexed=p.last_indexed_at.strftime("%Y-%m-%d %H:%M") if p.last_indexed_at else "Pending",
         created_at=p.created_at.isoformat(),
     )
@@ -200,7 +203,9 @@ async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depen
             detail=f"Creating a project from source '{payload.source_type}' is not implemented yet.",
         )
 
-    existing = (await db.execute(select(Project).where(Project.name == payload.name))).scalars().first()
+    existing = (
+        (await db.execute(select(Project).where(func.lower(Project.name) == payload.name.lower()))).scalars().first()
+    )
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{payload.name}' already exists.")
 
@@ -231,6 +236,7 @@ async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depen
             description=payload.description or f"Project created with {template} starter.",
             root_path=str(proj_dir),
             is_indexed=False,
+            origin="user",
             languages=TEMPLATE_LANGUAGES[template],
             file_count=count_workspace_files(proj_dir) or 0,
             last_indexed_at=None,
@@ -238,6 +244,11 @@ async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depen
         db.add(project)
         await db.commit()
         await db.refresh(project)
+    except IntegrityError:
+        # Lost a race with a concurrent request that registered the same name (unique index).
+        await db.rollback()
+        shutil.rmtree(proj_dir, ignore_errors=True)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{payload.name}' already exists.")
     except Exception:
         # Only the folder created a moment ago by this request is removed.
         await db.rollback()

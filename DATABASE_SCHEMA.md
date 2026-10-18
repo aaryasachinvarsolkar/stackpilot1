@@ -4,6 +4,46 @@ STACKPILOT leverages a relational database (PostgreSQL in production, SQLite for
 
 ---
 
+## 0. What is actually implemented (Phase 3a)
+
+Sections 1-2 below are the **target design**. The database that exists today has four tables:
+`projects`, `project_files`, `conversations`, `messages`. There is no `users` table, no
+`code_chunks`/`embeddings`/`tasks`/`agent_runs`/`tool_calls`/`test_runs`/`git_commits`, and the
+columns differ from the design (for example `projects.languages` is JSON, not `language_summary`).
+
+Differences from the design that are intentional for now:
+- `projects` additionally has `origin` (`unclassified`, `user`, `import`, `upload`, `git`, `seed`),
+  `archived_at`, `last_scanned_at`; `project_files` has `file_hash`.
+- Project names are unique ignoring case (`ux_projects_name_lower`); a file path is unique per
+  project (`ux_project_files_project_path`).
+- Timestamps are timezone-aware UTC in the API on every backend. SQLite stores them as text without
+  an offset (always UTC); the `UTCDateTime` type restores the offset when reading.
+- SQLite connections enforce foreign keys, so `ON DELETE CASCADE` really cascades.
+
+### Migrations (Alembic)
+Schema changes are made only through Alembic (`backend/alembic/`). `create_all` is no longer used.
+
+| Revision | Content |
+|---|---|
+| `0001` | Baseline: exactly the schema the application created before migrations existed |
+| `0002` | Adds `origin`, `archived_at`, `last_scanned_at`, `file_hash` and the integrity indexes. Additive only: no existing value changes; existing projects become `origin='unclassified'` |
+
+Run from `backend/` (the URL comes from `DATABASE_URL`):
+```bash
+alembic current                 # show the database's revision
+alembic upgrade head            # apply pending migrations
+alembic downgrade 0001          # undo 0002 (original columns and data are untouched)
+alembic stamp 0001              # ONLY for a database created before Alembic: marks it as the baseline
+```
+**Startup behaviour:** the app never migrates an existing database by itself. On a completely empty
+database it creates the schema; if the database already has tables but is unstamped or behind
+`head`, it refuses to start and prints the command to run. **Always take a verified backup first**
+(`python scripts/backup.py create ...`, see TESTING.md). SQLite migrations run in a single
+transaction (a failure rolls everything back); `0002` also checks for conflicting data before it
+changes anything.
+
+---
+
 ## 1. Entity Relationship Overview
 
 ```

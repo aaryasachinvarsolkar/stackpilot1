@@ -27,7 +27,8 @@ os.environ["ENVIRONMENT"] = "test"
 os.environ["DEBUG"] = "False"
 
 from app.main import app  # noqa: E402
-from app.database import engine, Base  # noqa: E402
+from app.database import engine  # noqa: E402
+from app.database.migrations import ensure_database_ready  # noqa: E402
 
 # Hard guard: refuse to run if the engine could possibly point at real data.
 _db_file = Path(engine.url.database or "").resolve()
@@ -79,9 +80,8 @@ def sandbox_cwd():
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def setup_test_db(sandbox_cwd):
-    """Create the schema in the sandbox database, and remove everything afterwards."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Build the sandbox schema by running the real Alembic migrations (so they are tested too)."""
+    await ensure_database_ready(engine)
     yield
     await engine.dispose()
 

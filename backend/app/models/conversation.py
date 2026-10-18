@@ -18,6 +18,7 @@ class Conversation(Base, TimestampMixin):
         String(36),
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
     )
     title: Mapped[str] = mapped_column(String(255), default="Engineering Discussion", nullable=False)
 
@@ -27,6 +28,7 @@ class Conversation(Base, TimestampMixin):
         "Message",
         back_populates="conversation",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         lazy="selectin",
         order_by="Message.created_at",
     )
@@ -44,6 +46,7 @@ class Message(Base, TimestampMixin):
         String(36),
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
     )
     sender: Mapped[str] = mapped_column(String(32), nullable=False)  # 'user', 'assistant', 'system'
     content: Mapped[str] = mapped_column(Text, nullable=False)

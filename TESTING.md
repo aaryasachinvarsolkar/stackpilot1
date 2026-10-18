@@ -80,6 +80,10 @@ tables in the development database.
 | `test_chat.py` | Chat history and the honest 503 (no AI provider yet) |
 | `test_security_regressions.py` | One test per audited defect (F1, F2, F3, F3b, F4, F6, F7) |
 | `test_isolation.py` | The test harness cannot touch real data |
+| `test_migrations.py` | Alembic: baseline equals the pre-Alembic schema, legacy DB stamp/upgrade/downgrade keeps every value, pre-flight abort, atomic rollback, startup guard |
+| `test_integrity.py` | Enforced foreign keys and cascades, UTC timestamps, lazy loading, unique indexes, `origin` |
+| `test_backup_script.py` | `scripts/backup.py` create / verify / restore, tamper detection, no-overwrite and no-delete guarantees |
+| `test_network_binding.py` | Defaults keep the API on loopback (`config.py`, `.env.example`, Compose ports) |
 
 The audited defects were first captured as strict-xfail tests (Phase 1). Phase 2 fixed them, the
 strict xfails flipped to failures (XPASS), and the markers were removed. Run the suite from
@@ -89,10 +93,18 @@ strict xfails flipped to failures (XPASS), and the markers were removed. Run the
 ```bash
 python scripts/backup.py create --dest C:\path\outside\the\repo\backups
 python scripts/backup.py verify C:\path\outside\the\repo\backups\<date>
+python scripts/backup.py restore C:\path\outside\the\repo\backups\<date> --target-db C:\somewhere\restored.db --target-workspaces C:\somewhere\empty-dir
 ```
 Backs up the SQLite database (online backup API), `backend/workspaces/` (zip + SHA-256 manifest)
 and the env files, then verifies integrity, row counts and hashes. The destination must be
 outside the repository.
+
+`verify` checks the backup on its own; differences from the live data are shown as information and
+only fail with `--strict-live`. `restore` never deletes: it refuses to overwrite an existing target
+database unless you pass `--move-existing` (which renames the old file to
+`<name>.replaced-<UTC timestamp>`), extracts workspaces only into an empty directory, refuses
+archive entries that escape that directory, and re-verifies what it restored. Rehearse a restore
+into a scratch location before relying on a backup.
 
 ### Frontend checks
 ```bash
