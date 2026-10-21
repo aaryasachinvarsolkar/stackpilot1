@@ -32,13 +32,11 @@ async def test_reading_a_scaffolded_file_inside_the_project_works(async_client):
     assert "FastAPI(" in res.json()["content"]
 
 
-async def test_writing_a_file_inside_the_project_persists_to_disk(async_client):
+async def test_updating_a_file_inside_the_project_persists_to_disk(async_client, save):
     proj = await _create(async_client, "kb-control-write")
-    res = await async_client.put(
-        f"/api/projects/{proj['id']}/files/content", json={"path": "notes/hello.txt", "content": "hi"}
-    )
+    res = await save(proj, "app/main.py", "hi")
     assert res.status_code == 200
-    assert (Path(proj["root_path"]) / "notes" / "hello.txt").read_text(encoding="utf-8") == "hi"
+    assert (Path(proj["root_path"]) / "app" / "main.py").read_bytes() == b"hi"
 
 
 # --- Fixed defects ----------------------------------------------------------------------

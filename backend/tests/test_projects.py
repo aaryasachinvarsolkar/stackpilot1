@@ -120,10 +120,10 @@ async def test_existing_folder_on_disk_is_never_adopted_or_overwritten(async_cli
 
 async def test_file_count_is_measured_on_disk_not_taken_from_the_database(async_client, project):
     base = project["file_count"]
-    res = await async_client.put(
-        f"/api/projects/{project['id']}/files/content", json={"path": "extra/new.txt", "content": "x"}
-    )
-    assert res.status_code == 200
+    # A file appears on disk behind the application's back (the file API only updates existing files).
+    extra = Path(project["root_path"]) / "extra" / "new.txt"
+    extra.parent.mkdir()
+    extra.write_bytes(b"x")
     assert (await async_client.get(f"/api/projects/{project['id']}")).json()["file_count"] == base + 1
 
 

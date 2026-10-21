@@ -35,6 +35,7 @@ pgdata/
 
 # User project data (created by the app at runtime; never commit)
 backend/workspaces/
+backend/runtime/
 
 # Backups (normally stored outside the repo; ignored here as a safety net)
 backups/
@@ -72,3 +73,6 @@ Thumbs.db
 
 # Docker
 docker-data/
+
+# Monaco runtime copied from node_modules by frontend/scripts/copy-monaco.mjs
+frontend/public/monaco/

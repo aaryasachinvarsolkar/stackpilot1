@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -109,30 +110,31 @@ async def test_oversized_file_read_is_413(async_client: AsyncClient, project, mo
 
 # --- write -------------------------------------------------------------------------------
 
-async def test_save_file_content(async_client: AsyncClient, project):
-    payload = {"path": "app/test_file.py", "content": "# Test file content\nprint('hello world')\n"}
-    res = await async_client.put(files_url(project, "content"), json=payload)
+async def test_save_file_content(save, project):
+    """Updating an existing file: the response reports the bytes written and the hash of the new content."""
+    content = "# Test file content\nprint('hello world')\n"
+    res = await save(project, "app/main.py", content)
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "saved"
-    assert data["path"] == "app/test_file.py"
-    assert data["bytes_written"] == len(payload["content"].encode("utf-8"))
-    assert (Path(project["root_path"]) / "app" / "test_file.py").read_text(encoding="utf-8") == payload["content"]
+    assert data["path"] == "app/main.py"
+    assert data["bytes_written"] == len(content.encode("utf-8"))
+    assert data["sha256"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
+    assert (Path(project["root_path"]) / "app" / "main.py").read_bytes() == content.encode("utf-8")
 
 
-async def test_save_overwrites_existing_file_without_leaving_temp_files(async_client: AsyncClient, project):
+async def test_save_overwrites_existing_file_without_leaving_temp_files(save, project):
     target = Path(project["root_path"]) / "app" / "main.py"
-    res = await async_client.put(files_url(project, "content"), json={"path": "app/main.py", "content": "NEW"})
+    res = await save(project, "app/main.py", "NEW")
     assert res.status_code == 200
     assert target.read_text(encoding="utf-8") == "NEW"
     assert list(target.parent.glob(".sp-*")) == []
 
 
-async def test_content_round_trips_byte_for_byte_including_crlf_and_unicode(async_client: AsyncClient, project):
+async def test_content_round_trips_byte_for_byte_including_crlf_and_unicode(async_client: AsyncClient, save, project):
     content = "line1\r\nline2\r\nünïcode ✓\r\n"
-    assert (
-        await async_client.put(files_url(project, "content"), json={"path": "rt.txt", "content": content})
-    ).status_code == 200
+    (Path(project["root_path"]) / "rt.txt").write_bytes(b"placeholder")  # saves update existing files only
+    assert (await save(project, "rt.txt", content)).status_code == 200
     assert (Path(project["root_path"]) / "rt.txt").read_bytes() == content.encode("utf-8")
     back = await async_client.get(files_url(project, "content"), params={"path": "rt.txt"})
     assert back.json()["content"] == content
@@ -145,8 +147,8 @@ async def test_oversized_save_is_413_and_writes_nothing(async_client: AsyncClien
     assert not (Path(project["root_path"]) / "toobig.txt").exists()
 
 
-async def test_saving_over_a_directory_is_400(async_client: AsyncClient, project):
-    res = await async_client.put(files_url(project, "content"), json={"path": "app", "content": "x"})
+async def test_saving_over_a_directory_is_400(save, project):
+    res = await save(project, "app", "x", base_sha256="0" * 64)
     assert res.status_code == 400
 
 

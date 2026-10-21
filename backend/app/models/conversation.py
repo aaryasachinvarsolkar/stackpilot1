@@ -51,7 +51,14 @@ class Message(Base, TimestampMixin):
     sender: Mapped[str] = mapped_column(String(32), nullable=False)  # 'user', 'assistant', 'system'
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
-    plan_steps: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    plan_steps: Mapped[list] = mapped_column(JSON, default=list, nullable=False)  # no longer written for new messages
+
+    # Grounded Q&A (migration 0003). Both are NULL for every message written before grounding existed; such a
+    # message is a "legacy" message and is never reported as verified.
+    #   status:    answered_verified | answered_unverified | not_in_context | unavailable   (assistant messages)
+    #   grounding: retrieval counts, citation metadata (excerpt id, path, line range, status, hashes). Never excerpt text.
+    status: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    grounding: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Relationships
     conversation: Mapped["Conversation"] = relationship("Conversation", back_populates="messages")

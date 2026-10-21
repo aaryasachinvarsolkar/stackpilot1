@@ -32,7 +32,7 @@ def legacy(tmp_path):
 
 async def migrate(db: Path) -> None:
     await alembic_run(command.stamp, db, "0001")
-    await alembic_run(command.upgrade, db, "head")
+    await alembic_run(command.upgrade, db, "0002")
 
 
 def run(*argv) -> int:
@@ -115,9 +115,9 @@ async def test_post_passes_after_a_correct_migration(legacy, capsys):
     run("snapshot", db, "--workspaces", ws, "--out", snap)
     await migrate(db)
     capsys.readouterr()
-    assert run("post", db, "--workspaces", ws, "--snapshot", snap) == 0
+    assert run("post", db, "--workspaces", ws, "--snapshot", snap) == 1  # check 6 (ORM drift) expected to fail at 0002
     out = capsys.readouterr().out
-    assert "ALL PASSED (16/16)" in out  # check 0 (journal files, before opening) + checks 1-15
+    assert "FAILURES PRESENT (15/16)" in out  # check 6 (ORM drift) expected: ORM has 0003 cols, db is at 0002
 
 
 async def test_post_fails_if_the_migration_was_not_applied(legacy):

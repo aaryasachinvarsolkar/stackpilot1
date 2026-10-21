@@ -1,0 +1,13 @@
+{
+  "name": "stackpilot-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "StackPilot AI-Powered Software Development Platform",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "start": "npm --prefix frontend run start",
+    "lint": "npm --prefix frontend run lint",
+    "backend": "powershell -Command \"cd backend; .\\.venv\\Scripts\\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000 --reload\""
+  }
+}

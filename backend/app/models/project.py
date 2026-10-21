@@ -45,6 +45,13 @@ class Project(Base, TimestampMixin):
         passive_deletes=True,
         lazy="select",
     )
+    chunks: Mapped[List["CodeChunk"]] = relationship(
+        "CodeChunk",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="select",
+    )
 
 
 class ProjectFile(Base, TimestampMixin):
@@ -73,8 +80,19 @@ class ProjectFile(Base, TimestampMixin):
 
     # Relationships
     project: Mapped["Project"] = relationship("Project", back_populates="files")
+    chunks: Mapped[List["CodeChunk"]] = relationship(
+        "CodeChunk",
+        back_populates="file",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="select",
+        overlaps="chunks",
+    )
+
 
 
 # Project names are unique regardless of case (workspace folders collide case-insensitively on Windows).
 Index("ux_projects_name_lower", func.lower(Project.name), unique=True)
 Index("ux_project_files_project_path", ProjectFile.project_id, ProjectFile.file_path, unique=True)
+Index("ux_project_files_id_project_id", ProjectFile.id, ProjectFile.project_id, unique=True)
+

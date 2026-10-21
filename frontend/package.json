@@ -3,14 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
+    "copy-monaco": "node scripts/copy-monaco.mjs",
+    "predev": "npm run copy-monaco",
+    "dev": "next dev -H 127.0.0.1 -p 3000",
+    "prebuild": "npm run copy-monaco",
     "build": "next build",
-    "start": "next start -p 3000",
-    "lint": "next lint"
+    "start": "next start -H 127.0.0.1 -p 3000",
+    "lint": "next lint",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.447.0",
+    "monaco-editor": "^0.52.2",
     "next": "14.2.15",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -23,6 +30,7 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
-    "typescript": "^5.6.2"
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.9"
   }
 }

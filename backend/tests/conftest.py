@@ -25,6 +25,12 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{(SANDBOX / 'test.db').as_pos
 os.environ["WORKSPACES_ROOT"] = str(SANDBOX / "workspaces")
 os.environ["ENVIRONMENT"] = "test"
 os.environ["DEBUG"] = "False"
+# Tests must never reach a real AI provider, whatever the developer's .env says. Tests that need a provider set it themselves.
+os.environ["LLM_PROVIDER"] = "mock"
+os.environ["LLM_API_KEY"] = "mock-key"
+os.environ["ALLOW_SENDING_CODE_TO_PROVIDER"] = "false"
+os.environ["ALLOW_RUNNING_PROJECT_CODE"] = "false"
+os.environ["RUNTIME_ROOT"] = str(SANDBOX / "runtime")
 
 from app.main import app  # noqa: E402
 from app.database import engine  # noqa: E402
@@ -99,5 +105,32 @@ async def project(async_client) -> dict:
 async def async_client():
     """Yield an HTTPX AsyncClient bound to the FastAPI ASGI app."""
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         yield client
+
+
+# A well-formed hash that matches no real file; for tests where the hash is irrelevant (e.g. a path that
+# must be rejected before the hash is ever looked at).
+ANY_SHA256 = "0" * 64
+CURRENT = "current"
+
+
+@pytest_asyncio.fixture
+async def save(async_client):
+    """Save an existing file the way the editor does: read its current sha256, send it back as base_sha256.
+
+    `save(project, path, content)` uses the hash the file has right now. Pass `base_sha256=` to send a
+    specific value instead (a stale hash, ANY_SHA256, or None to omit the field).
+    """
+
+    async def _save(project: dict, path: str, content: str, base_sha256=CURRENT):
+        if base_sha256 == CURRENT:
+            got = await async_client.get(f"/api/projects/{project['id']}/files/content", params={"path": path})
+            assert got.status_code == 200, f"could not read {path!r} to get its hash: {got.text}"
+            base_sha256 = got.json()["sha256"]
+        body = {"path": path, "content": content}
+        if base_sha256 is not None:
+            body["base_sha256"] = base_sha256
+        return await async_client.put(f"/api/projects/{project['id']}/files/content", json=body)
+
+    return _save

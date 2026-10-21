@@ -156,8 +156,15 @@ async def test_baseline_revision_reproduces_the_pre_alembic_schema_exactly(tmp_p
     assert table_shape(fresh) == table_shape(legacy)
 
 
-async def test_there_is_a_single_linear_history_ending_at_0002():
-    assert head_revision() == "0002"
+async def test_there_is_a_single_linear_history_ending_at_0004():
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(alembic_config())
+    assert head_revision() == "0004"
+    assert script.get_heads() == ["0004"], "there must be exactly one head (no branches)"
+    assert [r.revision for r in script.walk_revisions()] == ["0004", "0003", "0002", "0001"]
+    assert [r.down_revision for r in script.walk_revisions()] == ["0003", "0002", "0001", None]
+
 
 
 @pytest.mark.filterwarnings("ignore:.*expression-based index.*")
@@ -189,8 +196,9 @@ async def test_legacy_database_is_stamped_then_upgraded_without_changing_any_val
     assert snapshot(db) == before, "stamping must not touch data"
 
     await alembic_run(command.upgrade, db, "head")
-    assert revision_of(db) == "0002"
+    assert revision_of(db) == "0004"
     assert snapshot(db) == before, "every original value of every row must be identical after upgrade"
+
     integrity_ok(db)
 
     conn = sqlite3.connect(db)
@@ -225,7 +233,8 @@ async def test_upgrade_twice_is_a_no_op(tmp_path):
     after_first = (snapshot(db), table_shape(db))
     await alembic_run(command.upgrade, db, "head")
     assert (snapshot(db), table_shape(db)) == after_first
-    assert revision_of(db) == "0002"
+    assert revision_of(db) == "0004"
+
 
 
 async def test_downgrade_restores_the_original_schema_and_every_value(tmp_path):
@@ -304,8 +313,10 @@ async def test_guard_builds_the_schema_on_a_completely_empty_database(tmp_path):
         await ensure_database_ready(engine)
     finally:
         await engine.dispose()
-    assert revision_of(db) == "0002"
-    assert {"projects", "project_files", "conversations", "messages"} <= names(db, "table")
+    assert revision_of(db) == "0004"
+    assert {"projects", "project_files", "conversations", "messages", "code_chunks", "embeddings"} <= names(db, "table")
+    assert {"status", "grounding"} <= set(columns(db, "messages"))
+
 
 
 async def test_guard_refuses_an_unstamped_legacy_database_and_leaves_it_untouched(tmp_path):
@@ -349,3 +360,255 @@ async def test_guard_accepts_a_database_at_head(tmp_path):
     finally:
         await engine.dispose()
     assert file_hash(db) == before
+
+
+# --- 0003: grounded answers (messages.status, messages.grounding) -----------------------------------------------------------
+# Every database here is a throwaway file under pytest's tmp_path. Migration 0003 is never run against real data.
+
+NEW_MESSAGE_COLUMNS = ["status", "grounding"]
+
+
+def message_column_info(path: Path) -> dict:
+    conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        return {r[1]: {"type": r[2].upper(), "notnull": r[3], "default": r[4]} for r in conn.execute("PRAGMA table_info(messages)")}
+    finally:
+        conn.close()
+
+
+async def db_at_0002(tmp_path: Path, name: str = "at0002.db") -> Path:
+    db = tmp_path / name
+    make_legacy_db(db)
+    await alembic_run(command.stamp, db, "0001")
+    await alembic_run(command.upgrade, db, "0002")
+    assert revision_of(db) == "0002"
+    return db
+
+
+def all_shapes_except_messages(path: Path) -> dict:
+    return {t: shape for t, shape in table_shape(path).items() if t != "messages"}
+
+
+async def test_0003_adds_exactly_two_nullable_columns_with_the_agreed_types(tmp_path):
+    db = await db_at_0002(tmp_path)
+    before_columns = columns(db, "messages")
+    await alembic_run(command.upgrade, db, "0003")
+    assert revision_of(db) == "0003"
+    assert columns(db, "messages") == before_columns + NEW_MESSAGE_COLUMNS
+    info = message_column_info(db)
+    assert info["status"]["type"] == "VARCHAR(24)" and info["status"]["notnull"] == 0 and info["status"]["default"] is None
+    assert info["grounding"]["type"] == "JSON" and info["grounding"]["notnull"] == 0 and info["grounding"]["default"] is None
+
+
+async def test_0003_changes_no_other_table_and_no_existing_message_column(tmp_path):
+    db = await db_at_0002(tmp_path)
+    others_before, shape_before = all_shapes_except_messages(db), dict(table_shape(db)["messages"][0] and {"cols": table_shape(db)["messages"][0]})
+    snap_before = snapshot(db)
+    await alembic_run(command.upgrade, db, "0003")
+    assert all_shapes_except_messages(db) == others_before
+    assert table_shape(db)["messages"][0][: len(shape_before["cols"])] == shape_before["cols"]
+    assert snapshot(db) == snap_before, "every value of every original column must be identical"
+    assert NEW_INDEXES <= names(db, "index"), "the indexes of 0002 must survive"
+    integrity_ok(db)
+
+
+async def test_existing_messages_become_legacy_with_null_status_and_grounding_and_nothing_is_back_filled(tmp_path):
+    db = await db_at_0002(tmp_path)
+    await alembic_run(command.upgrade, db, "0003")
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT id, content, status, grounding FROM messages").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("m1", "héllo ✓", None, None)]
+
+
+async def test_0003_contains_no_data_statements():
+    source = (BACKEND_DIR / "alembic" / "versions" / "0003_message_grounding.py").read_text(encoding="utf-8")
+    code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+    for forbidden in ("op.execute", "UPDATE", "INSERT", "DELETE", "bulk_insert", "drop_table", "create_table", "drop_index", "create_index"):
+        assert forbidden not in code, f"0003 must only add and remove its two columns, but contains {forbidden!r}"
+
+
+async def test_new_columns_store_and_return_json_and_unicode(tmp_path):
+    db = await db_at_0002(tmp_path)
+    await alembic_run(command.upgrade, db, "0003")
+    payload = {"version": 1, "citations": [{"excerpt_id": "E1", "path": "app/ü.py", "start_line": 3, "status": "verified"}]}
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, sender, content, citations, plan_steps, created_at, updated_at, status, grounding) "
+            "VALUES ('m2','c1','assistant','answer','[]','[]','2026-10-21 00:00:00','2026-10-21 00:00:00','answered_verified',?)",
+            (json.dumps(payload),),
+        )
+        conn.commit()
+        status, grounding = conn.execute("SELECT status, grounding FROM messages WHERE id='m2'").fetchone()
+    finally:
+        conn.close()
+    assert status == "answered_verified" and json.loads(grounding) == payload
+
+
+async def test_downgrade_removes_only_the_two_new_columns_and_keeps_all_other_data(tmp_path):
+    db = await db_at_0002(tmp_path)
+    shape_0002, snap_0002 = table_shape(db), snapshot(db)
+    await alembic_run(command.upgrade, db, "0003")
+    conn = sqlite3.connect(db)  # a grounded message written while at 0003 must lose only its two new values
+    try:
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, sender, content, citations, plan_steps, created_at, updated_at, status, grounding) "
+            "VALUES ('m2','c1','assistant','kept text','[]','[]','2026-10-21 00:00:00','2026-10-21 00:00:00','answered_unverified','{\"version\": 1}')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    await alembic_run(command.downgrade, db, "0002")
+
+    assert revision_of(db) == "0002"
+    assert table_shape(db) == shape_0002, "the schema must be exactly what it was at 0002"
+    assert columns(db, "messages") == ORIGINAL_COLUMNS["messages"].split(",")
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT content FROM messages WHERE id='m2'").fetchone() == ("kept text",)
+    finally:
+        conn.close()
+    assert {k: v for k, v in snapshot(db).items() if k != "messages"} == {k: v for k, v in snap_0002.items() if k != "messages"}
+    assert [r for r in snapshot(db)["messages"] if r[0] == "m1"] == snap_0002["messages"]
+    assert NEW_INDEXES <= names(db, "index")
+    integrity_ok(db)
+
+
+async def test_upgrade_downgrade_upgrade_round_trips(tmp_path):
+    db = await db_at_0002(tmp_path)
+    shape_0002 = table_shape(db)
+    await alembic_run(command.upgrade, db, "head")
+    shape_0004 = table_shape(db)
+    await alembic_run(command.downgrade, db, "0002")
+    assert table_shape(db) == shape_0002
+    await alembic_run(command.upgrade, db, "head")
+    assert table_shape(db) == shape_0004 and revision_of(db) == "0004"
+    integrity_ok(db)
+
+
+async def test_full_downgrade_from_head_still_restores_the_original_schema(tmp_path):
+    db = tmp_path / "legacy.db"
+    make_legacy_db(db)
+    original_shape, before = table_shape(db), snapshot(db)
+    await alembic_run(command.stamp, db, "0001")
+    await alembic_run(command.upgrade, db, "head")
+    await alembic_run(command.downgrade, db, "0001")
+    assert table_shape(db) == original_shape and snapshot(db) == before and revision_of(db) == "0001"
+
+
+async def test_guard_refuses_a_database_still_at_0002_and_leaves_it_untouched(tmp_path):
+    """After this release the app will not start on a 0002 database until `alembic upgrade head` is run on purpose."""
+    db = await db_at_0002(tmp_path)
+    before = file_hash(db)
+    engine = await _engine(db)
+    try:
+        with pytest.raises(DatabaseNotReady) as exc:
+            await ensure_database_ready(engine)
+    finally:
+        await engine.dispose()
+    assert "alembic upgrade head" in str(exc.value)
+    assert file_hash(db) == before, "the guard must never migrate by itself"
+    assert "status" not in columns(db, "messages")
+
+
+async def test_models_declare_the_new_columns_as_nullable():
+    from app.models.conversation import Message
+
+    status, grounding = Message.__table__.c.status, Message.__table__.c.grounding
+    assert status.nullable and grounding.nullable
+    assert status.type.length == 24 and type(grounding.type).__name__ == "JSON"
+    assert Message.__table__.c.plan_steps.nullable is False, "plan_steps stays as it was"
+
+
+async def test_every_migration_test_in_this_file_uses_a_throwaway_database(tmp_path):
+    """The real database is never a migration target: alembic_config always receives an explicit tmp url."""
+    db = await db_at_0002(tmp_path)
+    assert tmp_path in db.parents
+    assert Path(BACKEND_DIR / "stackpilot.db").resolve() != db.resolve()
+
+
+# --- 0004: AST code_chunks and embeddings ---------------------------------------------------
+
+async def test_0004_creates_code_chunks_and_embeddings_tables(tmp_path):
+    db = tmp_path / "test0004.db"
+    await alembic_run(command.upgrade, db, "0004")
+    assert revision_of(db) == "0004"
+    assert {"code_chunks", "embeddings"} <= names(db, "table")
+    assert {"file_id", "project_id", "chunk_index", "chunk_type", "symbol_name", "start_line", "end_line", "content", "metadata_json"} <= set(columns(db, "code_chunks"))
+    assert {"chunk_id", "model_name", "dimensions", "vector"} <= set(columns(db, "embeddings"))
+    assert "ux_code_chunks_file_chunk_index" in names(db, "index")
+    assert "ux_embeddings_chunk_model" in names(db, "index")
+    assert "ux_project_files_id_project_id" in names(db, "index")
+
+
+async def test_0004_composite_foreign_key_prevents_mismatched_project_file(tmp_path):
+    """Enforce that code_chunks cannot associate with a file from a different project."""
+    db = tmp_path / "fk_test.db"
+    await alembic_run(command.upgrade, db, "0004")
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        # Create 2 projects
+        now = "2026-10-21 12:00:00"
+        conn.execute("INSERT INTO projects (id, name, root_path, is_indexed, languages, file_count, created_at, updated_at) VALUES ('p1', 'proj1', '/tmp/p1', 0, '[]', 0, ?, ?)", (now, now))
+        conn.execute("INSERT INTO projects (id, name, root_path, is_indexed, languages, file_count, created_at, updated_at) VALUES ('p2', 'proj2', '/tmp/p2', 0, '[]', 0, ?, ?)", (now, now))
+        # Create file in p1
+        conn.execute("INSERT INTO project_files (id, project_id, file_path, file_name, file_size_bytes, language, last_scanned_at, created_at, updated_at) VALUES ('f1', 'p1', 'main.py', 'main.py', 10, 'python', ?, ?, ?)", (now, now, now))
+        conn.commit()
+
+        # Valid chunk: file f1 in project p1
+        conn.execute("INSERT INTO code_chunks (id, project_id, file_id, chunk_index, chunk_type, symbol_name, start_line, end_line, content, metadata_json, created_at, updated_at) VALUES ('c1', 'p1', 'f1', 0, 'function', 'test', 1, 5, 'def test(): pass', '{}', ?, ?)", (now, now))
+        conn.commit()
+
+        # Invalid chunk: file f1 associated with mismatched project p2
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO code_chunks (id, project_id, file_id, chunk_index, chunk_type, symbol_name, start_line, end_line, content, metadata_json, created_at, updated_at) VALUES ('c2', 'p2', 'f1', 0, 'function', 'test2', 1, 5, 'def test2(): pass', '{}', ?, ?)", (now, now))
+            conn.commit()
+    finally:
+        conn.close()
+
+
+async def test_0004_allows_multiple_models_per_chunk_and_rejects_duplicates(tmp_path):
+    """Embeddings table allows multiple models per chunk, but rejects duplicate model for same chunk."""
+    db = tmp_path / "embed_test.db"
+    await alembic_run(command.upgrade, db, "0004")
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        now = "2026-10-21 12:00:00"
+        conn.execute("INSERT INTO projects (id, name, root_path, is_indexed, languages, file_count, created_at, updated_at) VALUES ('p1', 'proj1', '/tmp/p1', 0, '[]', 0, ?, ?)", (now, now))
+        conn.execute("INSERT INTO project_files (id, project_id, file_path, file_name, file_size_bytes, language, last_scanned_at, created_at, updated_at) VALUES ('f1', 'p1', 'main.py', 'main.py', 10, 'python', ?, ?, ?)", (now, now, now))
+        conn.execute("INSERT INTO code_chunks (id, project_id, file_id, chunk_index, chunk_type, symbol_name, start_line, end_line, content, metadata_json, created_at, updated_at) VALUES ('c1', 'p1', 'f1', 0, 'function', 'test', 1, 5, 'def test(): pass', '{}', ?, ?)", (now, now))
+        conn.commit()
+
+        # Insert model 1
+        conn.execute("INSERT INTO embeddings (id, chunk_id, model_name, dimensions, vector, created_at) VALUES ('e1', 'c1', 'openai-small', 1536, '[0.1, 0.2]', ?)", (now,))
+        # Insert model 2 for same chunk (allowed)
+        conn.execute("INSERT INTO embeddings (id, chunk_id, model_name, dimensions, vector, created_at) VALUES ('e2', 'c1', 'gemini-embed', 768, '[0.3, 0.4]', ?)", (now,))
+        conn.commit()
+
+        # Duplicate model 1 for same chunk (rejected by unique constraint ux_embeddings_chunk_model)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO embeddings (id, chunk_id, model_name, dimensions, vector, created_at) VALUES ('e3', 'c1', 'openai-small', 1536, '[0.5, 0.6]', ?)", (now,))
+            conn.commit()
+    finally:
+        conn.close()
+
+
+async def test_0004_downgrade_to_0003_removes_tables_and_preserves_other_data(tmp_path):
+    db = tmp_path / "downgrade_test.db"
+    await alembic_run(command.upgrade, db, "0004")
+    assert revision_of(db) == "0004"
+    assert {"code_chunks", "embeddings"} <= names(db, "table")
+
+    await alembic_run(command.downgrade, db, "0003")
+    assert revision_of(db) == "0003"
+    assert "code_chunks" not in names(db, "table")
+    assert "embeddings" not in names(db, "table")
+    assert "ux_project_files_id_project_id" not in names(db, "index")
+    integrity_ok(db)
+

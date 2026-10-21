@@ -6,6 +6,10 @@ from app.database import check_database_connection, get_db
 from app.api.projects import router as projects_router
 from app.api.files import router as files_router
 from app.api.chat import router as chat_router
+from app.api.indexing import router as indexing_router
+from app.api.changes import router as changes_router
+from app.api.preview import router as preview_router
+from app.api.run import router as run_router
 
 router = APIRouter()
 
@@ -13,6 +17,11 @@ router = APIRouter()
 router.include_router(projects_router)
 router.include_router(files_router)
 router.include_router(chat_router)
+router.include_router(indexing_router)
+router.include_router(changes_router)
+router.include_router(preview_router)
+router.include_router(run_router)
+
 
 
 @router.get("/health", summary="Basic Liveness Check")
